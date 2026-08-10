@@ -16,6 +16,7 @@ você aprova -> publica.
 """
 
 import base64
+import html
 import json
 import os
 import re
@@ -57,11 +58,23 @@ CHECK_INTERVAL = 10 * 60      # 10 min: resposta tardia nasce enterrada
 MAX_POST_AGE_MIN = 60         # ignora post mais velho que isso
 MIN_SCORE = 7                 # corte de relevância (0-10)
 MAX_ALERTS_PER_CYCLE = 6      # teto anti-enxurrada
+SEEN_RETENTION_DAYS = 7       # limpeza da tabela seen (frescor é de 60 min)
 
 # Posts originais para o perfil: uma leva de ideias por dia, neste horário (0-23,
 # hora local do servidor). A resposta traz o visitante; o perfil é quem converte.
 IDEAS_HOUR = 9
 IDEAS_PER_BATCH = 3
+
+REQUIRED_ENV = [
+    "X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_SECRET",
+    "X_BEARER_TOKEN", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "ANTHROPIC_API_KEY",
+]
+
+missing = [k for k in REQUIRED_ENV if not os.environ.get(k)]
+if missing:
+    raise SystemExit(
+        "Faltam variáveis de ambiente: " + ", ".join(missing) +
+        "\nVeja o README. Nenhuma delas vai no código nem no Git.")
 
 X_API_KEY = os.environ["X_API_KEY"]
 X_API_SECRET = os.environ["X_API_SECRET"]
@@ -77,6 +90,13 @@ TG = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 with open(CATALOG_PATH, encoding="utf-8") as f:
     CATALOG = json.load(f)
+
+REQUIRED_PRODUCT_FIELDS = ("slug", "name", "character", "show")
+for _p in CATALOG:
+    _faltando = [f for f in REQUIRED_PRODUCT_FIELDS if not _p.get(f)]
+    if _faltando:
+        raise SystemExit(
+            f"catalogo.json: produto {_p.get('slug', '?')} sem {', '.join(_faltando)}")
 
 # ----------------------------------------------------------------------------
 # BANCO
@@ -109,11 +129,25 @@ def init_db():
 def already_seen(tweet_id):
     """Evita reprocessar o mesmo post vindo das duas fontes."""
     with db() as conn:
-        if conn.execute("SELECT 1 FROM seen WHERE tweet_id = ?", (tweet_id,)).fetchone():
-            return True
-        conn.execute("INSERT INTO seen VALUES (?, ?)",
+        return conn.execute(
+            "SELECT 1 FROM seen WHERE tweet_id = ?", (tweet_id,)).fetchone() is not None
+
+
+def mark_seen(tweet_id):
+    """
+    Marca depois da análise, não antes: se a chamada ao Claude falhar (rate limit,
+    timeout), o post continua elegível no próximo ciclo em vez de sumir para sempre.
+    """
+    with db() as conn:
+        conn.execute("INSERT OR IGNORE INTO seen VALUES (?, ?)",
                      (tweet_id, datetime.now(timezone.utc).isoformat()))
-    return False
+
+
+def cleanup_seen(days=SEEN_RETENTION_DAYS):
+    """A tabela seen só precisa cobrir a janela de frescor. O resto é peso morto."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    with db() as conn:
+        conn.execute("DELETE FROM seen WHERE at < ?", (cutoff,))
 
 
 def recent_replies(limit=8):
@@ -150,14 +184,46 @@ def catalog_terms():
     return sorted(terms)
 
 
+# Termos de uma palavra só que também são palavras comuns em inglês. "Friends" e
+# "Eleven" casariam com metade da timeline se valessem sozinhos, e cada falso
+# positivo custa uma chamada de visão do Claude. Só contam se o post também falar
+# de roupa.
+AMBIGUOUS_TERMS = {"friends", "eleven", "it", "you", "us", "him", "her"}
+
+GARMENT_WORDS = [
+    "outfit", "look", "wear", "wearing", "wore", "style", "styled", "fashion",
+    "jacket", "coat", "blazer", "dress", "skirt", "jeans", "pants", "trousers",
+    "sweater", "jumper", "cardigan", "shirt", "blouse", "top", "hoodie",
+    "boots", "shoes", "sneakers", "bag", "hat", "cap", "costume", "uniform",
+    "closet", "wardrobe", "fit", "fits",
+]
+
+
+def _mentions(text_low, term):
+    """Casa por palavra inteira: 'cap' não pode casar dentro de 'capture'."""
+    return re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text_low) is not None
+
+
+def mentions_clothing(text_low):
+    return any(_mentions(text_low, w) for w in GARMENT_WORDS)
+
+
 def match_products(text):
     low = text.lower()
+    about_clothes = mentions_clothing(low)
     hits = []
+
     for p in CATALOG:
         keys = [p["character"].lower(), p["show"].lower()] + \
                [k.lower() for k in p.get("keywords", [])]
-        if any(k in low for k in keys):
+        for k in keys:
+            if not _mentions(low, k):
+                continue
+            # termo ambíguo de uma palavra só vale se o post for sobre roupa
+            if k in AMBIGUOUS_TERMS and not about_clothes:
+                continue
             hits.append(p)
+            break
     return hits
 
 
@@ -298,21 +364,39 @@ def post_reply(tweet_id, text):
     return r.json()["data"]["id"], None
 
 
+MEDIA_ENDPOINTS = [
+    "https://api.x.com/2/media/upload",                    # atual
+    "https://upload.twitter.com/1.1/media/upload.json",    # legado, em descontinuação
+]
+
+
 def upload_media(image_url):
     """
     Sobe uma imagem pra X e devolve o media_id.
-    Usa o endpoint v1.1 — a v2 ainda não faz upload de mídia.
+    Tenta o endpoint v2 e cai no v1.1 se ele não responder — a X migrou o upload
+    e o legado pode sumir a qualquer momento.
     """
     try:
         img = requests.get(image_url, timeout=30)
         img.raise_for_status()
-        r = requests.post("https://upload.twitter.com/1.1/media/upload.json",
-                          auth=oauth, files={"media": img.content}, timeout=60)
-        r.raise_for_status()
-        return r.json()["media_id_string"]
     except Exception as e:
-        print(f"[media] upload falhou: {e}")
+        print(f"[media] não consegui baixar {image_url}: {e}")
         return None
+
+    for endpoint in MEDIA_ENDPOINTS:
+        try:
+            r = requests.post(endpoint, auth=oauth,
+                              files={"media": img.content}, timeout=60)
+            r.raise_for_status()
+            data = r.json()
+            media_id = data.get("media_id_string") or data.get("id") or \
+                data.get("data", {}).get("id")
+            if media_id:
+                return str(media_id)
+            print(f"[media] {endpoint} respondeu sem media_id: {str(data)[:120]}")
+        except Exception as e:
+            print(f"[media] {endpoint} falhou: {e}")
+    return None
 
 
 def post_tweet(text, image_url=None):
@@ -494,8 +578,8 @@ def send_ideas(trending_posts):
         idea_id = uuid.uuid4().hex[:8]
 
         body = (f"📝 <b>Post para o perfil</b>\n"
-                f"🎬 {product.get('name', '—')}\n\n"
-                f"{idea['text']}\n\n"
+                f"🎬 {html.escape(product.get('name', '—'))}\n\n"
+                f"{html.escape(idea['text'])}\n\n"
                 f"<i>{'com imagem do produto' if image_url else 'sem imagem'}"
                 f" · ou responda com seu próprio texto</i>")
 
@@ -545,20 +629,27 @@ def send_draft(post, analysis, products):
     url = f"https://x.com/{post['author']}/status/{post['id']}"
     prod = products[0]["name"] if products else "—"
 
+    # o Claude nem sempre devolve os dois rascunhos; o alerta não pode morrer por isso
+    opt_a = (analysis.get("a") or "").strip()
+    opt_b = (analysis.get("b") or "").strip()
+
     body = (
-        f"⭐ <b>{analysis['score']}/10</b> · {analysis.get('motivo', '')}\n"
+        f"⭐ <b>{analysis.get('score', '?')}/10</b> · {analysis.get('motivo', '')}\n"
         f"🎬 produto: {prod}\n\n"
-        f"🐦 <b>@{post['author']}</b>\n<i>{post['text'][:350]}</i>\n\n"
-        f"<b>A)</b> {analysis['a']}\n\n<b>B)</b> {analysis['b']}\n\n"
-        f'<a href="{url}">ver post</a> · <i>ou responda com seu próprio texto</i>'
+        f"🐦 <b>@{post['author']}</b>\n<i>{html.escape(post['text'][:350])}</i>\n\n"
+        f"<b>A)</b> {html.escape(opt_a)}\n"
+        + (f"\n<b>B)</b> {html.escape(opt_b)}\n" if opt_b else "")
+        + f'\n<a href="{url}">ver post</a> · <i>ou responda com seu próprio texto</i>'
     )
+
+    buttons = [{"text": "✅ A", "callback_data": f"a:{draft_id}"}]
+    if opt_b:
+        buttons.append({"text": "✅ B", "callback_data": f"b:{draft_id}"})
+    buttons.append({"text": "🗑", "callback_data": f"x:{draft_id}"})
 
     result = tg("sendMessage", chat_id=TELEGRAM_CHAT_ID, text=body, parse_mode="HTML",
                 link_preview_options={"is_disabled": True},
-                reply_markup={"inline_keyboard": [[
-                    {"text": "✅ A", "callback_data": f"a:{draft_id}"},
-                    {"text": "✅ B", "callback_data": f"b:{draft_id}"},
-                    {"text": "🗑", "callback_data": f"x:{draft_id}"}]]})
+                reply_markup={"inline_keyboard": [buttons]})
     if not result:
         return
 
@@ -566,12 +657,15 @@ def send_draft(post, analysis, products):
         conn.execute(
             "INSERT INTO drafts (id, tweet_id, author, opt_a, opt_b, product, score,"
             " message_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (draft_id, post["id"], post["author"], analysis["a"], analysis["b"],
-             prod, analysis["score"], result["message_id"],
+            (draft_id, post["id"], post["author"], opt_a, opt_b,
+             prod, analysis.get("score"), result["message_id"],
              datetime.now(timezone.utc).isoformat()))
 
 
 def publish(draft, text, chat_id):
+    if not (text or "").strip():
+        tg("sendMessage", chat_id=chat_id, text="❌ Rascunho vazio, nada publicado.")
+        return
     reply_id, err = post_reply(draft["tweet_id"], text)
     if err:
         tg("sendMessage", chat_id=chat_id, text=f"❌ Falhou\n{err}")
@@ -665,9 +759,17 @@ def maybe_send_ideas(trending):
 
 
 def cycle():
+    cleanup_seen()
     posts = fetch_from_intent() + fetch_from_accounts()
     maybe_send_ideas(posts)
-    candidates = [p for p in posts if is_fresh(p) and not already_seen(p["id"])]
+
+    # dedupe dentro do próprio ciclo: o mesmo post pode vir das duas fontes
+    candidates, batch_ids = [], set()
+    for p in posts:
+        if p["id"] in batch_ids or not is_fresh(p) or already_seen(p["id"]):
+            continue
+        batch_ids.add(p["id"])
+        candidates.append(p)
     print(f"[ciclo] {len(posts)} posts, {len(candidates)} novos e recentes")
 
     scored = []
@@ -675,6 +777,7 @@ def cycle():
         try:
             products = match_products(post["text"])
             analysis = analyze(post, products)
+            mark_seen(post["id"])  # só depois de analisar de verdade
             if analysis.get("score", 0) >= MIN_SCORE and analysis.get("a"):
                 scored.append((analysis["score"], post, analysis, products))
             else:
@@ -687,6 +790,58 @@ def cycle():
     for _, post, analysis, products in scored[:MAX_ALERTS_PER_CYCLE]:
         send_draft(post, analysis, products)
         print(f"  ✔ enviado ({analysis['score']}/10) @{post['author']}")
+
+
+def check():
+    """
+    Verificação de fumaça: confere credenciais e conectividade sem publicar nada.
+    Rode isto ANTES do primeiro ciclo de verdade — `python bot.py --check`.
+    """
+    ok = True
+    print(f"catálogo: {len(CATALOG)} produtos, "
+          f"{len({p['character'] for p in CATALOG})} personagens")
+    print(f"buscas de intenção geradas: {len(build_intent_queries())}")
+
+    me = tg("getMe")
+    print(f"telegram: {'@' + me['username'] if me else 'FALHOU'}")
+    ok &= bool(me)
+
+    sent = tg("sendMessage", chat_id=TELEGRAM_CHAT_ID,
+              text="🔍 Teste de conexão — nada foi publicado na X.")
+    print(f"telegram chat_id: {'ok' if sent else 'FALHOU — confira TELEGRAM_CHAT_ID'}")
+    ok &= bool(sent)
+
+    try:
+        r = requests.get("https://api.twitter.com/2/users/me", auth=oauth, timeout=30)
+        if r.status_code < 300:
+            print(f"x (escrita): ok, conta @{r.json()['data']['username']}")
+        else:
+            print(f"x (escrita): FALHOU {r.status_code} — {r.text[:150]}")
+            print("  403 aqui = app não está como Read and write, ou o Access Token")
+            print("  foi gerado antes da permissão. Regenere o token no portal.")
+            ok = False
+    except Exception as e:
+        print(f"x (escrita): FALHOU {e}")
+        ok = False
+
+    try:
+        data = x_get("tweets/search/recent",
+                     {"query": build_intent_queries()[0], "max_results": 10})
+        print(f"x (leitura): ok, {len(parse_posts(data))} posts na busca de teste")
+    except Exception as e:
+        print(f"x (leitura): FALHOU {e}")
+        ok = False
+
+    try:
+        claude.messages.create(model="claude-sonnet-5", max_tokens=10,
+                               messages=[{"role": "user", "content": "responda: ok"}])
+        print("claude: ok")
+    except Exception as e:
+        print(f"claude: FALHOU {e}")
+        ok = False
+
+    print("\n" + ("tudo pronto." if ok else "corrija os itens acima antes de rodar."))
+    return ok
 
 
 def main():
@@ -704,4 +859,9 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys
+
+    if "--check" in sys.argv:
+        init_db()
+        raise SystemExit(0 if check() else 1)
     main()
