@@ -1,0 +1,56 @@
+# --- Segredos: nunca versionar ---
+# X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_SECRET, X_BEARER_TOKEN,
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ANTHROPIC_API_KEY vivem só em variáveis
+# de ambiente (Render / Oracle / Hetzner) ou num .env local que fica fora do Git.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# --- Estado do bot ---
+# O SQLite guarda drafts, ideias, offset do Telegram e a tabela seen.
+# Em produção fica no Disk montado (/data/bot.db), nunca no repositório.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+bot.db
+data/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Ambientes virtuais
+.venv/
+venv/
+env/
+ENV/
+
+# Ferramentas
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Sistema operacional / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# --- Diversos ---
+*.log
+tmp/
