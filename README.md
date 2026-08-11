@@ -9,29 +9,41 @@ e o resultado é alcance cortado ou suspensão.
 
 ## O que ele faz
 
-**1. Oportunidades de resposta** — a cada 10 minutos, em camadas:
+**1. Oportunidades de resposta** — a cada 10 minutos, em duas camadas e dois idiomas
+(`LANGUAGES = ["en", "pt"]`):
 
-| Camada | O que busca | Prazo de validade |
-|---|---|---|
-| `intent` | frase de compra + personagem/série — quem pergunta e diz de quê | 6 h |
-| `fandom` | personagem/série + palavra de roupa — quem comenta o figurino sem usar frase de compra ("Rachel's blazer in this scene") | 6 h |
-| `generic` | frase de compra + roupa, sem catálogo, só com imagem — a legenda não diz a série, a imagem diz. **Desligado por padrão** | 6 h |
-| `accounts` | timeline das contas em `ACCOUNTS` | 60 min |
+| Camada | O que busca |
+|---|---|
+| `intent` | frase de compra + personagem/série — quem pergunta e diz de quê |
+| `fandom` | personagem/série + palavra de roupa — quem comenta o figurino sem usar frase de compra ("Rachel's blazer in this scene") |
+| `accounts` | timeline das contas em `ACCOUNTS` |
 
 Buscar "por fandom" sem a palavra de roupa não funciona: conversa de fandom é
 majoritariamente enredo, ator e spoiler. O que separa o figurino do resto é o
 vocabulário de roupa (`GARMENT_TERMS`), não o nome da série.
 
+Janela de 7 dias, que é o alcance máximo da busca recente da X. Post velho rende menos
+alcance, mas não custa nada a mais tentar.
+
 Pipeline: coleta → filtro de idade → dedupe → casa com o catálogo → **pré-filtro
-local** → o Claude lê **o texto e a imagem** dos sobreviventes e dá nota 0–10 → acima
-de `MIN_SCORE` vira alerta.
+local** → o Claude lê **o texto** dos sobreviventes e dá nota 0–10 → acima de
+`MIN_SCORE` vira alerta.
 
 O pré-filtro (`prescore`) é a peça que torna a busca ampla viável. Ele pontua de graça,
 sem chamar a API: intenção de compra, personagem citado, palavra de roupa, imagem
-presente e poucas respostas (pergunta ainda sem resposta é onde você entra). Só os
-`MAX_ANALYSIS_PER_CYCLE` melhores gastam uma chamada de visão. Duas regras derrubam o
-post na hora: sem roupa e sem intenção não há o que responder; intenção sem roupa nem
-produto é sobre outra coisa ("where to buy tickets").
+presente, poucas respostas (pergunta sem resposta é onde você entra) e tração do post
+(mais gente vê a sua resposta). Só os `MAX_ANALYSIS_PER_CYCLE` melhores viram chamada
+ao Claude. Uma regra derruba o post na hora: intenção de compra sem roupa e sem produto
+é sobre outra coisa ("where to buy tickets for the tour").
+
+O objetivo da resposta é **engajar o fandom**, não acertar o produto — like da
+comunidade já leva gente ao perfil. Por isso um post sem produto correspondente pode
+tirar nota alta, e o corte é deliberadamente frouxo.
+
+**O bot não lê a imagem do post, só o texto.** Foi uma decisão consciente: ler imagem
+encarecia cada análise a ponto de limitar o volume, e volume é o que importa quando a
+meta é engajamento. O prompt instrui o modelo a nunca afirmar detalhe visual que não
+esteja escrito no texto.
 
 **2. Posts originais para o perfil** — uma vez por dia, no horário `IDEAS_HOUR`.
 Cruza o que está em alta nas contas monitoradas com o catálogo e sugere 3 posts, cada
@@ -118,6 +130,9 @@ Alternativas: Oracle Cloud Always Free ($0) ou Hetzner (~€4/mês), ambos com `
 
 ## Como usar no dia a dia
 
+Manual completo em [`MANUAL.md`](MANUAL.md) — como ler os alertas, o que ajustar em
+cada situação, rotina sugerida e o que fazer quando algo dá errado. O resumo:
+
 Chega uma mensagem com a nota, o produto que casou, o post original e os rascunhos:
 
 - **✅ A / ✅ B** → publica o rascunho como resposta
@@ -133,7 +148,7 @@ Nos posts do perfil, os botões são **✅ Publicar** e **🗑**.
 |---|---|---|
 | Leitura de posts (X) | ~$0,005 por post lido | 6 contas × 144 checagens/dia; a maioria volta vazia |
 | Publicar resposta (X) | $0,015 sem link / $0,20 com link | por isso o rascunho nunca tem link |
-| Claude Sonnet | centavos por análise | a imagem é o que mais pesa |
+| Claude Sonnet | centavos por análise | só texto, sem imagem — bem mais barato |
 | Hospedagem | $0–$7/mês | Render, Oracle Free ou Hetzner |
 
 Se as contas monitoradas postarem muito, aumente `CHECK_INTERVAL` ou corte a lista.
@@ -144,20 +159,22 @@ Todos no topo do `bot.py`:
 
 Recall — quantas oportunidades o bot enxerga:
 
-- **`INTENT_PHRASES`** — as frases de intenção de compra. É onde está o retorno.
-- **`GARMENT_TERMS`** — o vocabulário de roupa da camada `fandom`. Ampliar aqui é o
-  jeito mais direto de achar mais gente falando de figurino.
-- **`ENABLE_GENERIC_TIER`** (`False`) — liga a camada 3. Recall alto, precisão baixa.
-  Ligue só depois de calibrar as outras duas, e olhando a cota de leitura.
+- **`LANGUAGES`** (`["en", "pt"]`) — idiomas monitorados. Cada um dobra o número de
+  buscas e o consumo de cota. Os rascunhos sempre saem no idioma do post original.
+- **`INTENT_PHRASES`** — as frases de intenção de compra, por idioma.
+- **`GARMENT_TERMS`** — o vocabulário de roupa da camada `fandom`, por idioma. Ampliar
+  aqui é o jeito mais direto de achar mais gente falando de figurino.
 - **`ACCOUNTS`** — contas de fandom, não de moda. Conta gigante significa competir com
   centenas de replies; contas médias (10k–200k) do seu nicho rendem muito mais.
-- **`MAX_INTENT_AGE_MIN`** (6 h) — pergunta de compra sem resposta continua valendo.
+- **`MAX_POST_AGE_MIN`** (7 dias) — o máximo que a busca recente da X alcança.
+- O próprio **`catalogo.json`**: cada personagem novo amplia as duas camadas de uma vez.
+  É o ajuste de maior efeito sobre o recall.
 
 Precisão — quanto lixo chega no seu Telegram:
 
-- **`MIN_SCORE`** (7) — o corte do Claude. Notificação demais faz você ignorar o bot e
-  abandonar em duas semanas. Se estiver chegando lixo, suba para 8.
-- **`MAX_ALERTS_PER_CYCLE`** (6) — teto por ciclo, mesma lógica.
+- **`MIN_SCORE`** (6) — o corte do Claude. Notificação demais faz você ignorar o bot e
+  abandonar em duas semanas. Se estiver chegando lixo, suba para 7 ou 8.
+- **`MAX_ALERTS_PER_CYCLE`** (8) — teto por ciclo, mesma lógica.
 - **`PRE_MIN_SCORE`** (4) — corte do pré-filtro local.
 
 Custo — leia antes de alargar a busca:
@@ -167,7 +184,7 @@ Custo — leia antes de alargar a busca:
   todo ciclo. Ao bater o teto o bot para de buscar até a virada do dia, em vez de
   gerar conta ou bloqueio. 300/dia ≈ 9.000/mês.
 - **`SEARCH_RESULTS_PER_QUERY`** (20) — resultados por query. Multiplica direto a cota.
-- **`MAX_ANALYSIS_PER_CYCLE`** (25) — teto de chamadas de visão do Claude por ciclo.
+- **`MAX_ANALYSIS_PER_CYCLE`** (25) — teto de chamadas ao Claude por ciclo.
 - **`CHECK_INTERVAL`** (10 min) — resposta tardia nasce enterrada, mas cada ciclo lê
   posts. Se a cota apertar, suba isto antes de cortar as camadas.
 - **`IDEAS_HOUR`** / **`IDEAS_PER_BATCH`** — a leva diária de posts do perfil.

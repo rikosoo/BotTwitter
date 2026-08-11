@@ -21,13 +21,19 @@ personagem" é enorme lá, é tráfego perene e aceita link direto (o IG não).
 Duas funções, ambas com **aprovação humana obrigatória** via botão no Telegram.
 Nada vai ao ar sozinho — automação de resposta viola as regras da X e leva a suspensão.
 
-**1. Oportunidades de resposta.** Duas fontes:
-- `fetch_from_intent()` — busca gente perguntando "where to buy", "what jacket" etc.
-  cruzado com os personagens do catálogo. É a fonte que converte.
+**1. Oportunidades de resposta.** Duas fontes, em dois idiomas (`LANGUAGES = en, pt`):
+- `fetch_from_search()` — duas camadas. `intent`: gente perguntando "where to buy",
+  "onde comprar" cruzado com os personagens do catálogo. `fandom`: personagem/série +
+  vocabulário de roupa, para quem comenta figurino sem usar frase de compra.
 - `fetch_from_accounts()` — contas de fandom (série/filme), não de moda.
 
-Pipeline: coleta → filtro de idade (60 min) → dedupe → match com catálogo → Claude
-analisa texto **e imagem** e dá nota 0-10 → acima de 7 vira alerta com 2 rascunhos.
+Pipeline: coleta → filtro de idade (7 dias, que é o alcance máximo da busca recente da
+X) → dedupe → match com catálogo → `prescore()` local e gratuito → Claude analisa **só
+o texto** e dá nota 0-10 → acima de `MIN_SCORE` vira alerta com 2 rascunhos.
+
+O objetivo da resposta é engajamento com o fandom, não acertar o produto: like da
+comunidade já leva gente ao perfil. Post sem produto correspondente pode tirar nota
+alta.
 
 **2. Posts originais para o perfil.** Uma vez por dia (`IDEAS_HOUR`), cruza o que está
 em alta nas contas monitoradas com o catálogo e sugere 3 posts, cada um sobre um
@@ -41,10 +47,25 @@ para o site. Sem conteúdo próprio, a primeira metade é desperdiçada.
 1. **Aprovação humana obrigatória.** Não transformar em auto-reply.
 2. **Rascunhos de resposta nunca contêm link nem o nome do site.** Resposta com link
    custa $0,20 em vez de $0,015 na API da X, e o algoritmo corta o alcance. Site na bio.
-3. **Visão é essencial.** Post de fandom é print de cena. Sem ler a imagem, inútil.
-4. **Corte de relevância alto.** Notificação demais faz o dono ignorar e abandonar a
-   ferramenta em duas semanas. `MIN_SCORE` e `MAX_ALERTS_PER_CYCLE` existem pra isso.
-5. **Tom de fã que entende de figurino, nunca de loja.**
+3. **Tom de fã que entende de figurino, nunca de loja.**
+4. **Teto de custo sempre presente.** `MAX_READS_PER_DAY` (posts lidos na X),
+   `MAX_ANALYSIS_PER_CYCLE` (chamadas ao Claude) e `PRE_MIN_SCORE` (triagem local
+   gratuita). Alargar busca sem mexer neles é como a conta sai do controle.
+5. **Nunca afirmar detalhe visual que não está no texto.** Sem visão, o modelo não viu
+   a foto. Inventar o que aparece na cena destrói a credibilidade de fã na hora.
+
+### Decisões revertidas (com data e motivo)
+
+- **Visão obrigatória** — revertida em 11/08/2026. Era essencial quando o objetivo era
+  acertar o produto exato num print de cena. O objetivo virou engajar o fandom e ganhar
+  like, e nesse contexto ler imagem só encarece: sem ela cabe muito mais post analisado
+  pelo mesmo dinheiro. Junto saiu a camada de busca `generic` (compra + roupa sem citar
+  a série), que só funcionava porque a imagem identificava a produção.
+- **Corte de relevância alto** — afrouxado em 11/08/2026, mesmo motivo. `MIN_SCORE`
+  caiu de 7 para 6, o teto de nota para post sem produto no catálogo saiu, e o
+  pré-filtro deixou de exigir palavra de roupa quando o post casa com o catálogo.
+  O risco original continua real: se a enxurrada de notificação te fizer ignorar o bot,
+  suba `MIN_SCORE` de volta antes de qualquer outra coisa.
 
 ## Contexto importante: monetização da X não é o objetivo
 
@@ -84,11 +105,15 @@ Token. Se gerar antes, publicar falha com 403 e é preciso regenerar.
 
 1. **`image_url` do catálogo é um palpite** (`dresslikeme.store/images/{slug}.jpg`).
    Se o caminho real for outro, o upload falha em silêncio e o post sai sem imagem.
-2. **Catálogo incompleto.** Com 10 produtos o bot descarta oportunidades boas por
-   "não tenho o produto".
-3. **Tabela `seen` cresce sem limite.** Falta rotina de limpeza.
-4. **Nunca foi executado de verdade.** O código passa em análise sintática, mas não
-   houve teste de integração com as APIs.
+   Afeta só os posts do perfil; as respostas não usam imagem.
+2. **Catálogo incompleto.** Com 10 produtos, e só 7 personagens, o alcance das buscas
+   é estreito — cada personagem novo amplia as duas camadas de uma vez.
+3. **Nunca foi executado de verdade.** `python bot.py --check` valida credenciais e
+   conectividade sem publicar, mas não houve ciclo real com aprovação e publicação.
+4. **`MAX_READS_PER_DAY` é um chute** (300/dia ≈ 9.000/mês). Só o uso real mostra se
+   cabe no plano contratado da X. Conferir depois da primeira semana.
+5. **Sem métrica de resultado.** Não há como saber quais respostas deram like ou
+   clique — é o item 2 do backlog e o que permitiria calibrar o resto.
 
 ## Backlog, em ordem de valor
 

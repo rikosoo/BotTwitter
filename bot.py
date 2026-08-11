@@ -15,7 +15,6 @@ dá nota de 0 a 10 -> se passar do corte, manda rascunho pro Telegram ->
 você aprova -> publica.
 """
 
-import base64
 import html
 import json
 import os
@@ -47,30 +46,51 @@ ACCOUNTS = [
     "netflix",
 ]
 
-# Fonte B: frases de intenção de compra. O ouro está aqui.
-INTENT_PHRASES = [
-    '"where to buy"', '"where can i get"', '"where did she get"',
-    '"where did he get"', '"what jacket"', '"what dress"', '"what coat"',
-    '"outfit id"', '"same jacket"', '"need that jacket"', '"need this coat"',
-    '"obsessed with her outfit"', '"where is her dress from"',
-    '"how to dress like"', '"dress like"', '"recreate her look"',
-    '"outfit inspo"', '"looking for a jacket like"',
-]
+# Idiomas monitorados. Cada um dobra o número de buscas (e a cota de leitura),
+# então tire "pt" daqui se quiser rodar só no público americano.
+LANGUAGES = ["en", "pt"]
+
+# Fonte B: frases de intenção de compra, por idioma.
+INTENT_PHRASES = {
+    "en": [
+        '"where to buy"', '"where can i get"', '"where did she get"',
+        '"where did he get"', '"what jacket"', '"what dress"', '"what coat"',
+        '"outfit id"', '"same jacket"', '"need that jacket"',
+        '"obsessed with her outfit"', '"where is her dress from"',
+        '"how to dress like"', '"dress like"', '"recreate her look"',
+        '"outfit inspo"',
+    ],
+    "pt": [
+        '"onde comprar"', '"onde eu acho"', '"onde encontro"', '"onde consigo"',
+        '"que jaqueta"', '"que casaco"', '"que vestido"', '"queria esse casaco"',
+        '"quero essa jaqueta"', '"me vestir como"', '"inspiração de look"',
+        '"onde comprar parecido"',
+    ],
+}
 
 # Vocabulário de roupa usado NAS BUSCAS: é o que separa conversa de fandom sobre
-# figurino de conversa de fandom sobre enredo. Sem isso, "buscar por fandom" traz
-# spoiler, ator e teoria — e cada post inútil custa uma análise de imagem.
-GARMENT_TERMS = [
-    "outfit", "jacket", "coat", "dress", "skirt", "sweater", "blazer",
-    "costume", "wardrobe", "wearing", "style", "boots", "look",
-]
+# figurino de conversa sobre enredo. Sem isso, "buscar por fandom" traz spoiler,
+# ator e teoria.
+GARMENT_TERMS = {
+    "en": [
+        "outfit", "jacket", "coat", "dress", "skirt", "sweater", "blazer",
+        "costume", "wardrobe", "wearing", "style", "boots", "look",
+    ],
+    "pt": [
+        "look", "jaqueta", "casaco", "vestido", "saia", "suéter", "blazer",
+        "fantasia", "figurino", "roupa", "estilo", "bota", "usando",
+    ],
+}
 
-CHECK_INTERVAL = 10 * 60      # 10 min: resposta tardia nasce enterrada
-MAX_POST_AGE_MIN = 60         # post de timeline de fandom envelhece rápido
-MAX_INTENT_AGE_MIN = 6 * 60   # pergunta de compra sem resposta continua valendo
-MIN_SCORE = 7                 # corte de relevância do Claude (0-10)
-MAX_ALERTS_PER_CYCLE = 6      # teto anti-enxurrada no Telegram
-SEEN_RETENTION_DAYS = 7       # limpeza da tabela seen
+CHECK_INTERVAL = 10 * 60      # 10 min entre ciclos
+# Uma semana é o máximo útil: a busca recente da X só cobre os últimos 7 dias.
+# Post velho rende menos alcance, mas não custa nada a mais tentar.
+MAX_POST_AGE_MIN = 7 * 24 * 60
+MIN_SCORE = 6                 # corte de relevância do Claude (0-10)
+MAX_ALERTS_PER_CYCLE = 8      # teto anti-enxurrada no Telegram
+# Precisa ser maior que a janela de idade, senão um post limpo do seen volta a
+# ser analisado quando ainda está elegível.
+SEEN_RETENTION_DAYS = 14
 
 # Teto de gasto: cada análise é uma chamada de visão do Claude. Alargar a busca
 # sem alargar isto é como o custo saía do controle.
@@ -83,12 +103,6 @@ PRE_MIN_SCORE = 4             # corte do pré-filtro local, que é de graça
 # plano de entrada. Este teto é o freio — ao bater, o bot para de buscar até
 # meia-noite em vez de gerar conta ou bloqueio.
 MAX_READS_PER_DAY = 300
-
-# Camada 3: intenção de compra + roupa, SEM exigir termo do catálogo. Pega o
-# "where can I get this coat" embaixo de um print sem legenda — só a imagem
-# identifica a série. Recall alto e precisão baixa: ligue depois de calibrar as
-# duas primeiras camadas, e olhando a conta de custo.
-ENABLE_GENERIC_TIER = False
 
 # Posts originais para o perfil: uma leva de ideias por dia, neste horário (0-23,
 # hora local do servidor). A resposta traz o visitante; o perfil é quem converte.
@@ -220,12 +234,21 @@ def catalog_terms():
 # de roupa.
 AMBIGUOUS_TERMS = {"friends", "eleven", "it", "you", "us", "him", "her"}
 
+# Lista mais larga que GARMENT_TERMS: aquela vai na query da X (onde tamanho é
+# limitado), esta roda localmente de graça sobre o texto que já chegou.
 GARMENT_WORDS = [
+    # inglês
     "outfit", "look", "wear", "wearing", "wore", "style", "styled", "fashion",
     "jacket", "coat", "blazer", "dress", "skirt", "jeans", "pants", "trousers",
     "sweater", "jumper", "cardigan", "shirt", "blouse", "top", "hoodie",
     "boots", "shoes", "sneakers", "bag", "hat", "cap", "costume", "uniform",
     "closet", "wardrobe", "fit", "fits",
+    # português
+    "roupa", "roupas", "look", "figurino", "fantasia", "estilo", "moda",
+    "jaqueta", "casaco", "sobretudo", "blazer", "vestido", "saia", "calça",
+    "jeans", "suéter", "blusa", "camisa", "camiseta", "moletom", "cardigã",
+    "bota", "botas", "sapato", "tênis", "bolsa", "chapéu", "boina", "uniforme",
+    "guarda-roupa", "usando", "vestindo", "usava",
 ]
 
 
@@ -258,10 +281,9 @@ def match_products(text):
 
 
 MAX_QUERY_LEN = 450
-QUERY_SUFFIX = "-is:retweet lang:en"
 
 
-def _pack(fixed_group, terms, suffix=QUERY_SUFFIX):
+def _pack(fixed_group, terms, suffix):
     """
     Monta `(grupo fixo) (termos) sufixo`, quebrando em várias queries quando passa
     do limite de tamanho da X.
@@ -281,26 +303,28 @@ def _pack(fixed_group, terms, suffix=QUERY_SUFFIX):
 
 def build_queries():
     """
-    Três camadas, da mais precisa para a mais ampla:
+    Duas camadas, por idioma:
 
       intent   frase de compra + personagem/série — quem pergunta e diz de quê
       fandom   personagem/série + palavra de roupa — quem comenta o figurino
                sem usar frase de compra ("Rachel's blazer in this scene")
-      generic  frase de compra + roupa, sem catálogo, só com imagem — a legenda
-               não diz a série, a imagem diz. Desligado por padrão.
 
     A camada vira prioridade no pré-filtro: com orçamento limitado de análise,
     a pergunta explícita passa na frente do comentário casual.
-    """
-    intents = "(" + " OR ".join(INTENT_PHRASES) + ")"
-    garments = "(" + " OR ".join(GARMENT_TERMS) + ")"
-    terms = [f'"{t}"' for t in catalog_terms()]
 
-    queries = [("intent", q) for q in _pack(intents, terms)]
-    queries += [("fandom", q) for q in _pack(garments, terms)]
-    if ENABLE_GENERIC_TIER:
-        queries.append(
-            ("generic", f"{intents} {garments} has:media {QUERY_SUFFIX}"))
+    Havia uma terceira camada (compra + roupa, sem citar a série) que dependia
+    da leitura da imagem para saber de que produção era o print. Sem visão não
+    há como identificar, então ela saiu.
+    """
+    terms = [f'"{t}"' for t in catalog_terms()]
+    queries = []
+
+    for lang in LANGUAGES:
+        intents = "(" + " OR ".join(INTENT_PHRASES[lang]) + ")"
+        garments = "(" + " OR ".join(GARMENT_TERMS[lang]) + ")"
+        suffix = f"-is:retweet lang:{lang}"
+        queries += [("intent", q) for q in _pack(intents, terms, suffix)]
+        queries += [("fandom", q) for q in _pack(garments, terms, suffix)]
     return queries
 
 
@@ -356,16 +380,10 @@ def parse_posts(data):
 
 
 def is_fresh(post):
-    """
-    Uma pergunta de compra sem resposta continua valendo horas depois; um post de
-    timeline de fandom, não. Prazos diferentes por fonte.
-    """
     if not post.get("created_at"):
         return True
-    limit = MAX_INTENT_AGE_MIN if post.get("source") in ("intent", "generic") \
-        else MAX_POST_AGE_MIN
     created = datetime.fromisoformat(post["created_at"].replace("Z", "+00:00"))
-    return datetime.now(timezone.utc) - created < timedelta(minutes=limit)
+    return datetime.now(timezone.utc) - created < timedelta(minutes=MAX_POST_AGE_MIN)
 
 
 def fetch_from_accounts():
@@ -438,32 +456,32 @@ def fetch_from_search():
     return posts
 
 
-# pontuação do pré-filtro: quanto vale cada sinal antes de gastar visão
-TIER_BONUS = {"intent": 3, "generic": 2, "fandom": 1, "accounts": 0}
+# pontuação do pré-filtro: quanto vale cada sinal antes de gastar uma análise
+TIER_BONUS = {"intent": 3, "fandom": 1, "accounts": 0}
 
 
 def has_intent(text_low):
-    return any(_mentions(text_low, ph.strip('"')) for ph in INTENT_PHRASES)
+    return any(_mentions(text_low, ph.strip('"'))
+               for lang in LANGUAGES for ph in INTENT_PHRASES[lang])
 
 
 def prescore(post, products):
     """
     Triagem local, de graça, antes de mandar pro Claude. O ranking decide quem
-    ganha as MAX_ANALYSIS_PER_CYCLE chamadas de visão disponíveis — sem isso,
-    alargar a busca só multiplica a conta da API.
+    ganha as MAX_ANALYSIS_PER_CYCLE análises disponíveis.
+
+    O corte aqui é frouxo de propósito: o objetivo é engajar o fandom, não
+    acertar o produto. Quem decide se há o que dizer é o Claude, não esta função.
     """
     low = post["text"].lower()
     intent, clothing = has_intent(low), mentions_clothing(low)
 
-    # Duas regras duras, antes de qualquer pontuação:
-    # sem falar de roupa e sem perguntar onde comprar não há o que responder,
-    # nem que o post cite a série ("the vampire diaries finale made me cry");
-    if not (intent or clothing):
-        return 0, "sem roupa nem intenção"
-    # e intenção de compra sem roupa nem produto é sobre outra coisa
-    # ("where to buy tickets for the tour").
+    # Regra dura, uma só: intenção de compra sem roupa e sem produto é sobre
+    # outra coisa ("where to buy tickets for the tour"). Post de fandom que casa
+    # com o catálogo passa mesmo sem falar de roupa — pode render um bom
+    # comentário de figurino, e agora isso conta.
     if not (clothing or products):
-        return 0, "intenção fora do nicho"
+        return 0, "fora do nicho"
 
     score, why = TIER_BONUS.get(post.get("source", "accounts"), 0), []
 
@@ -479,13 +497,20 @@ def prescore(post, products):
     if clothing:
         score += 2
         why.append("roupa")
+    # print de cena costuma ser conversa sobre visual, mesmo sem dizer "outfit"
     if post.get("image"):
         score += 1
         why.append("imagem")
+
+    metrics = post.get("metrics", {})
     # pergunta com poucas respostas ainda não foi respondida — é onde você entra
-    if post.get("metrics", {}).get("reply_count", 0) < 20:
+    if metrics.get("reply_count", 0) < 20:
         score += 1
         why.append("pouca concorrência")
+    # post com tração leva sua resposta a mais gente, que é o objetivo aqui
+    if metrics.get("like_count", 0) >= 20:
+        score += 1
+        why.append("tração")
 
     return score, "+".join(why) or "nada"
 
@@ -549,56 +574,51 @@ def post_tweet(text, image_url=None):
     return r.json()["data"]["id"], None
 
 
-def fetch_image_b64(url):
-    """Baixa a imagem pro Claude conseguir olhar a cena."""
-    try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        if len(r.content) > 4_000_000:
-            return None, None
-        media_type = r.headers.get("Content-Type", "image/jpeg").split(";")[0]
-        return base64.b64encode(r.content).decode(), media_type
-    except Exception as e:
-        print(f"[img] falhou: {e}")
-        return None, None
-
-
 # ----------------------------------------------------------------------------
 # ANÁLISE + RASCUNHO (uma única chamada ao Claude)
 # ----------------------------------------------------------------------------
 
-PROMPT = """Você ajuda o dono do DressLikeMe, um site que identifica roupas usadas por
-personagens de filmes e séries e aponta onde comprar peças parecidas. Ele responde
-posts na X quando tem algo realmente útil a dizer. Ele NÃO é vendedor: é o cara que
-sabe identificar a peça da cena.
+PROMPT = """Você ajuda o dono do DressLikeMe a participar de conversas de fandom na X.
+Ele mantém um site que identifica roupas de personagens de filmes e séries. Mas aqui o
+objetivo NÃO é vender nem acertar o produto exato: é entrar na conversa como um fã que
+entende de figurino, ganhar like da comunidade e trazer gente pro perfil.
+
+Vender é consequência, nunca o assunto da resposta.
 
 POST DE @{author}:
 \"\"\"{text}\"\"\"
-{image_note}
 
-PRODUTOS QUE ELE TEM PARA ESTE CASO:
+PRODUTOS DO CATÁLOGO RELACIONADOS (contexto seu, NÃO é para citar na resposta):
 {products}
 
 RESPOSTAS RECENTES DELE (não repita ângulo, estrutura nem abertura):
 {recent}
 
 TAREFA
-1. Dê uma nota de 0 a 10 para a oportunidade:
-   10 = alguém perguntando explicitamente onde comprar uma peça que ele TEM
-    7 = post sobre um look de personagem que ele cobre, com espaço para ajudar
-    3 = post do fandom sem relação com roupa
-    0 = polêmica, notícia triste, política, ou nada a ver
-   Se a lista de produtos estiver vazia, o teto é 5.
-2. Se a nota for 7 ou mais, escreva DOIS rascunhos:
-   A: identifica a peça de forma concreta e útil (tipo, corte, detalhe da cena)
-   B: outro ângulo — um detalhe que só quem conhece a produção saberia,
-      ou uma alternativa mais barata para o mesmo look
+1. Dê uma nota de 0 a 10 para a oportunidade de engajar:
+   10 = alguém perguntando onde comprar uma peça de personagem que ele cobre
+    8 = conversa sobre o figurino/look de um personagem que ele cobre
+    6 = post de fandom de uma produção que ele cobre, com algum gancho de
+        roupa, estilo, época ou visual onde dá para somar algo
+    3 = post de fandom sobre enredo/ator, sem nenhum gancho visual
+    0 = polêmica, tragédia, política, ou assunto que não deve ser tocado
+   Não precisa ter produto no catálogo para dar nota alta. Um comentário bom
+   sobre figurino vale mesmo sem peça correspondente.
+2. Se a nota for {min_score} ou mais, escreva DOIS rascunhos:
+   A: uma observação concreta sobre a roupa/visual, do tipo que faz outro fã
+      responder "verdade, nunca reparei"
+   B: outro ângulo — um detalhe de produção, uma comparação de época, ou como
+      montar algo parecido
 
 REGRAS DOS RASCUNHOS
-- Máximo 240 caracteres. Mesmo idioma do post.
+- Máximo 240 caracteres. **Escreva no MESMO IDIOMA do post** (se o post está em
+  português, responda em português; se em inglês, em inglês).
 - NUNCA inclua link. NUNCA cite o nome do site. NUNCA convide para comprar.
-- Sem hashtag, sem emoji, sem elogio genérico.
-- Tem que soar como fã que manja de figurino, não como loja.
+- Sem hashtag, sem emoji, sem elogio genérico ("amei!", "que look!").
+- Tem que soar como fã que manja de figurino, não como loja nem como bot.
+- Você NÃO viu a imagem do post, só o texto. Não descreva o que aparece na foto
+  nem afirme detalhes visuais que não estão escritos — comente o que dá para
+  sustentar pelo texto, ou fale da peça/época em termos gerais.
 - Se não tiver certeza da peça, não invente marca — descreva o tipo.
 
 Responda APENAS com JSON, sem markdown:
@@ -606,27 +626,17 @@ Responda APENAS com JSON, sem markdown:
 
 
 def analyze(post, products):
-    image_note = ""
-    content = []
-
-    if post.get("image"):
-        b64, media_type = fetch_image_b64(post["image"])
-        if b64:
-            content.append({"type": "image", "source": {
-                "type": "base64", "media_type": media_type, "data": b64}})
-            image_note = "\n(A imagem do post está anexada — olhe a roupa na cena.)"
-
     prod_txt = "\n".join(
         f"- {p['name']} ({p['character']}, {p['show']})" for p in products
     ) or "nenhum produto do catálogo bate com este post"
 
-    content.append({"type": "text", "text": PROMPT.format(
-        author=post["author"], text=post["text"], image_note=image_note,
-        products=prod_txt, recent="\n".join(recent_replies()) or "nenhuma ainda")})
+    prompt = PROMPT.format(
+        author=post["author"], text=post["text"], products=prod_txt,
+        min_score=MIN_SCORE, recent="\n".join(recent_replies()) or "nenhuma ainda")
 
     msg = claude.messages.create(
         model="claude-sonnet-5", max_tokens=700,
-        messages=[{"role": "user", "content": content}])
+        messages=[{"role": "user", "content": prompt}])
 
     raw = "".join(b.text for b in msg.content if b.type == "text").strip()
     raw = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
@@ -663,7 +673,8 @@ FORMATOS QUE FUNCIONAM (escolha um diferente para cada post):
 - Curiosidade de produção sobre a peça
 
 REGRAS
-- Máximo 260 caracteres. Em inglês (a audiência é majoritariamente dos EUA).
+- Máximo 260 caracteres. Idiomas: {langs}. Se houver mais de um, distribua os
+  posts entre eles — cada post inteiro em um único idioma, nunca misturado.
 - SEM link e SEM hashtag no texto.
 - Abre com o gancho, não com contexto. Primeira linha decide se alguém para.
 - Não use "Did you know" nem pergunta retórica de abertura.
@@ -693,6 +704,8 @@ def generate_ideas(trending_posts):
         model="claude-sonnet-5", max_tokens=1200,
         messages=[{"role": "user", "content": IDEAS_PROMPT.format(
             trending=trending, catalog=catalog, n=IDEAS_PER_BATCH,
+            langs=", ".join({"en": "inglês", "pt": "português"}.get(l, l)
+                            for l in LANGUAGES),
             recent="\n".join(recent_ideas()) or "nenhum ainda")}])
 
     raw = "".join(b.text for b in msg.content if b.type == "text").strip()
@@ -769,8 +782,9 @@ def send_draft(post, analysis, products):
     opt_b = (analysis.get("b") or "").strip()
 
     origem = {"intent": "pergunta de compra", "fandom": "comentário de figurino",
-              "generic": "compra sem série identificada",
               "accounts": "conta monitorada"}.get(post.get("source"), "—")
+    if post.get("image"):
+        origem += " · tem imagem"
 
     body = (
         f"⭐ <b>{analysis.get('score', '?')}/10</b> · {analysis.get('motivo', '')}\n"
@@ -956,9 +970,11 @@ def check():
     print(f"catálogo: {len(CATALOG)} produtos, "
           f"{len({p['character'] for p in CATALOG})} personagens")
     queries = build_queries()
-    for tier in ("intent", "fandom", "generic"):
+    print(f"idiomas: {', '.join(LANGUAGES)}")
+    for tier in ("intent", "fandom"):
         n = sum(1 for t, _ in queries if t == tier)
         print(f"  camada {tier}: {n} query(s)")
+    print(f"cota de leitura hoje: {reads_today()}/{MAX_READS_PER_DAY}")
 
     me = tg("getMe")
     print(f"telegram: {'@' + me['username'] if me else 'FALHOU'}")
