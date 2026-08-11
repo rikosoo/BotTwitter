@@ -50,15 +50,45 @@ ACCOUNTS = [
 # Fonte B: frases de intenção de compra. O ouro está aqui.
 INTENT_PHRASES = [
     '"where to buy"', '"where can i get"', '"where did she get"',
-    '"what jacket"', '"what dress"', '"outfit id"', '"same jacket"',
-    '"need that jacket"', '"obsessed with her outfit"',
+    '"where did he get"', '"what jacket"', '"what dress"', '"what coat"',
+    '"outfit id"', '"same jacket"', '"need that jacket"', '"need this coat"',
+    '"obsessed with her outfit"', '"where is her dress from"',
+    '"how to dress like"', '"dress like"', '"recreate her look"',
+    '"outfit inspo"', '"looking for a jacket like"',
+]
+
+# Vocabulário de roupa usado NAS BUSCAS: é o que separa conversa de fandom sobre
+# figurino de conversa de fandom sobre enredo. Sem isso, "buscar por fandom" traz
+# spoiler, ator e teoria — e cada post inútil custa uma análise de imagem.
+GARMENT_TERMS = [
+    "outfit", "jacket", "coat", "dress", "skirt", "sweater", "blazer",
+    "costume", "wardrobe", "wearing", "style", "boots", "look",
 ]
 
 CHECK_INTERVAL = 10 * 60      # 10 min: resposta tardia nasce enterrada
-MAX_POST_AGE_MIN = 60         # ignora post mais velho que isso
-MIN_SCORE = 7                 # corte de relevância (0-10)
-MAX_ALERTS_PER_CYCLE = 6      # teto anti-enxurrada
-SEEN_RETENTION_DAYS = 7       # limpeza da tabela seen (frescor é de 60 min)
+MAX_POST_AGE_MIN = 60         # post de timeline de fandom envelhece rápido
+MAX_INTENT_AGE_MIN = 6 * 60   # pergunta de compra sem resposta continua valendo
+MIN_SCORE = 7                 # corte de relevância do Claude (0-10)
+MAX_ALERTS_PER_CYCLE = 6      # teto anti-enxurrada no Telegram
+SEEN_RETENTION_DAYS = 7       # limpeza da tabela seen
+
+# Teto de gasto: cada análise é uma chamada de visão do Claude. Alargar a busca
+# sem alargar isto é como o custo saía do controle.
+SEARCH_RESULTS_PER_QUERY = 20
+MAX_ANALYSIS_PER_CYCLE = 25
+PRE_MIN_SCORE = 4             # corte do pré-filtro local, que é de graça
+
+# A X cobra por post LIDO e o plano tem cota mensal. A camada fandom é ampla e
+# pode devolver o máximo em todo ciclo: 20 × 144 ciclos/dia estoura qualquer
+# plano de entrada. Este teto é o freio — ao bater, o bot para de buscar até
+# meia-noite em vez de gerar conta ou bloqueio.
+MAX_READS_PER_DAY = 300
+
+# Camada 3: intenção de compra + roupa, SEM exigir termo do catálogo. Pega o
+# "where can I get this coat" embaixo de um print sem legenda — só a imagem
+# identifica a série. Recall alto e precisão baixa: ligue depois de calibrar as
+# duas primeiras camadas, e olhando a conta de custo.
+ENABLE_GENERIC_TIER = False
 
 # Posts originais para o perfil: uma leva de ideias por dia, neste horário (0-23,
 # hora local do servidor). A resposta traz o visitante; o perfil é quem converte.
@@ -227,20 +257,50 @@ def match_products(text):
     return hits
 
 
-def build_intent_queries():
-    """Combina intenção + termos do catálogo, respeitando o limite de tamanho."""
-    intents = " OR ".join(INTENT_PHRASES)
-    terms = [f'"{t}"' for t in catalog_terms()]
-    queries, block = [], []
+MAX_QUERY_LEN = 450
+QUERY_SUFFIX = "-is:retweet lang:en"
 
+
+def _pack(fixed_group, terms, suffix=QUERY_SUFFIX):
+    """
+    Monta `(grupo fixo) (termos) sufixo`, quebrando em várias queries quando passa
+    do limite de tamanho da X.
+    """
+    out, block = [], []
     for term in terms:
         block.append(term)
-        if len(f'({intents}) ({" OR ".join(block)}) -is:retweet') > 450:
+        if len(f'{fixed_group} ({" OR ".join(block)}) {suffix}') > MAX_QUERY_LEN \
+                and len(block) > 1:
             block.pop()
-            queries.append(f'({intents}) ({" OR ".join(block)}) -is:retweet')
+            out.append(f'{fixed_group} ({" OR ".join(block)}) {suffix}')
             block = [term]
     if block:
-        queries.append(f'({intents}) ({" OR ".join(block)}) -is:retweet')
+        out.append(f'{fixed_group} ({" OR ".join(block)}) {suffix}')
+    return out
+
+
+def build_queries():
+    """
+    Três camadas, da mais precisa para a mais ampla:
+
+      intent   frase de compra + personagem/série — quem pergunta e diz de quê
+      fandom   personagem/série + palavra de roupa — quem comenta o figurino
+               sem usar frase de compra ("Rachel's blazer in this scene")
+      generic  frase de compra + roupa, sem catálogo, só com imagem — a legenda
+               não diz a série, a imagem diz. Desligado por padrão.
+
+    A camada vira prioridade no pré-filtro: com orçamento limitado de análise,
+    a pergunta explícita passa na frente do comentário casual.
+    """
+    intents = "(" + " OR ".join(INTENT_PHRASES) + ")"
+    garments = "(" + " OR ".join(GARMENT_TERMS) + ")"
+    terms = [f'"{t}"' for t in catalog_terms()]
+
+    queries = [("intent", q) for q in _pack(intents, terms)]
+    queries += [("fandom", q) for q in _pack(garments, terms)]
+    if ENABLE_GENERIC_TIER:
+        queries.append(
+            ("generic", f"{intents} {garments} has:media {QUERY_SUFFIX}"))
     return queries
 
 
@@ -296,10 +356,16 @@ def parse_posts(data):
 
 
 def is_fresh(post):
+    """
+    Uma pergunta de compra sem resposta continua valendo horas depois; um post de
+    timeline de fandom, não. Prazos diferentes por fonte.
+    """
     if not post.get("created_at"):
         return True
+    limit = MAX_INTENT_AGE_MIN if post.get("source") in ("intent", "generic") \
+        else MAX_POST_AGE_MIN
     created = datetime.fromisoformat(post["created_at"].replace("Z", "+00:00"))
-    return datetime.now(timezone.utc) - created < timedelta(minutes=MAX_POST_AGE_MIN)
+    return datetime.now(timezone.utc) - created < timedelta(minutes=limit)
 
 
 def fetch_from_accounts():
@@ -337,22 +403,91 @@ def fetch_from_accounts():
             if last_id:  # primeira rodada só define baseline
                 for p in batch:
                     p["author"] = p["author"] or username
+                    p["source"] = "accounts"
                 posts += batch
         except Exception as e:
             print(f"[erro] conta @{username}: {e}")
     return posts
 
 
-def fetch_from_intent():
+def reads_today():
+    return int(meta_get(f"reads:{datetime.now(timezone.utc):%Y-%m-%d}", 0))
+
+
+def add_reads(n):
+    key = f"reads:{datetime.now(timezone.utc):%Y-%m-%d}"
+    meta_set(key, reads_today() + n)
+
+
+def fetch_from_search():
     posts = []
-    for query in build_intent_queries():
+    for tier, query in build_queries():
+        if reads_today() >= MAX_READS_PER_DAY:
+            print(f"[cota] teto diário de {MAX_READS_PER_DAY} posts lidos atingido")
+            break
         try:
-            posts += parse_posts(x_get("tweets/search/recent",
-                                       {**MEDIA_PARAMS, "query": query,
-                                        "max_results": 15}))
+            batch = parse_posts(x_get("tweets/search/recent",
+                                      {**MEDIA_PARAMS, "query": query,
+                                       "max_results": SEARCH_RESULTS_PER_QUERY}))
+            add_reads(len(batch))
+            for p in batch:
+                p["source"] = tier
+            posts += batch
         except Exception as e:
-            print(f"[erro] busca: {e}")
+            print(f"[erro] busca {tier}: {e}")
     return posts
+
+
+# pontuação do pré-filtro: quanto vale cada sinal antes de gastar visão
+TIER_BONUS = {"intent": 3, "generic": 2, "fandom": 1, "accounts": 0}
+
+
+def has_intent(text_low):
+    return any(_mentions(text_low, ph.strip('"')) for ph in INTENT_PHRASES)
+
+
+def prescore(post, products):
+    """
+    Triagem local, de graça, antes de mandar pro Claude. O ranking decide quem
+    ganha as MAX_ANALYSIS_PER_CYCLE chamadas de visão disponíveis — sem isso,
+    alargar a busca só multiplica a conta da API.
+    """
+    low = post["text"].lower()
+    intent, clothing = has_intent(low), mentions_clothing(low)
+
+    # Duas regras duras, antes de qualquer pontuação:
+    # sem falar de roupa e sem perguntar onde comprar não há o que responder,
+    # nem que o post cite a série ("the vampire diaries finale made me cry");
+    if not (intent or clothing):
+        return 0, "sem roupa nem intenção"
+    # e intenção de compra sem roupa nem produto é sobre outra coisa
+    # ("where to buy tickets for the tour").
+    if not (clothing or products):
+        return 0, "intenção fora do nicho"
+
+    score, why = TIER_BONUS.get(post.get("source", "accounts"), 0), []
+
+    if intent:
+        score += 4
+        why.append("intenção")
+    if any(_mentions(low, p["character"].lower()) for p in products):
+        score += 3
+        why.append("personagem")
+    elif products:
+        score += 1
+        why.append("série")
+    if clothing:
+        score += 2
+        why.append("roupa")
+    if post.get("image"):
+        score += 1
+        why.append("imagem")
+    # pergunta com poucas respostas ainda não foi respondida — é onde você entra
+    if post.get("metrics", {}).get("reply_count", 0) < 20:
+        score += 1
+        why.append("pouca concorrência")
+
+    return score, "+".join(why) or "nada"
 
 
 def post_reply(tweet_id, text):
@@ -633,8 +768,13 @@ def send_draft(post, analysis, products):
     opt_a = (analysis.get("a") or "").strip()
     opt_b = (analysis.get("b") or "").strip()
 
+    origem = {"intent": "pergunta de compra", "fandom": "comentário de figurino",
+              "generic": "compra sem série identificada",
+              "accounts": "conta monitorada"}.get(post.get("source"), "—")
+
     body = (
         f"⭐ <b>{analysis.get('score', '?')}/10</b> · {analysis.get('motivo', '')}\n"
+        f"🔎 {origem}\n"
         f"🎬 produto: {prod}\n\n"
         f"🐦 <b>@{post['author']}</b>\n<i>{html.escape(post['text'][:350])}</i>\n\n"
         f"<b>A)</b> {html.escape(opt_a)}\n"
@@ -760,28 +900,43 @@ def maybe_send_ideas(trending):
 
 def cycle():
     cleanup_seen()
-    posts = fetch_from_intent() + fetch_from_accounts()
+    posts = fetch_from_search() + fetch_from_accounts()
     maybe_send_ideas(posts)
 
-    # dedupe dentro do próprio ciclo: o mesmo post pode vir das duas fontes
+    # dedupe dentro do próprio ciclo: o mesmo post pode vir de várias camadas
     candidates, batch_ids = [], set()
     for p in posts:
         if p["id"] in batch_ids or not is_fresh(p) or already_seen(p["id"]):
             continue
         batch_ids.add(p["id"])
         candidates.append(p)
-    print(f"[ciclo] {len(posts)} posts, {len(candidates)} novos e recentes")
+
+    # triagem local antes de gastar visão. Reprovado aqui já pode ir pro seen:
+    # a decisão é determinística, reavaliar no próximo ciclo daria o mesmo.
+    ranked = []
+    for p in candidates:
+        products = match_products(p["text"])
+        pre, why = prescore(p, products)
+        if pre >= PRE_MIN_SCORE:
+            ranked.append((pre, why, p, products))
+        else:
+            mark_seen(p["id"])
+
+    ranked.sort(key=lambda r: -r[0])
+    budget = ranked[:MAX_ANALYSIS_PER_CYCLE]
+    print(f"[ciclo] {len(posts)} coletados · {len(candidates)} novos · "
+          f"{len(ranked)} passaram no pré-filtro · {len(budget)} analisados")
 
     scored = []
-    for post in candidates:
+    for pre, why, post, products in budget:
         try:
-            products = match_products(post["text"])
             analysis = analyze(post, products)
             mark_seen(post["id"])  # só depois de analisar de verdade
             if analysis.get("score", 0) >= MIN_SCORE and analysis.get("a"):
                 scored.append((analysis["score"], post, analysis, products))
             else:
-                print(f"  descartado ({analysis.get('score')}): {post['text'][:60]}")
+                print(f"  descartado ({analysis.get('score')}, pré {pre} {why}): "
+                      f"{post['text'][:60]}")
         except Exception as e:
             print(f"[erro] análise {post['id']}: {e}")
 
@@ -800,7 +955,10 @@ def check():
     ok = True
     print(f"catálogo: {len(CATALOG)} produtos, "
           f"{len({p['character'] for p in CATALOG})} personagens")
-    print(f"buscas de intenção geradas: {len(build_intent_queries())}")
+    queries = build_queries()
+    for tier in ("intent", "fandom", "generic"):
+        n = sum(1 for t, _ in queries if t == tier)
+        print(f"  camada {tier}: {n} query(s)")
 
     me = tg("getMe")
     print(f"telegram: {'@' + me['username'] if me else 'FALHOU'}")
@@ -825,9 +983,16 @@ def check():
         ok = False
 
     try:
-        data = x_get("tweets/search/recent",
-                     {"query": build_intent_queries()[0], "max_results": 10})
-        print(f"x (leitura): ok, {len(parse_posts(data))} posts na busca de teste")
+        for tier, query in queries:
+            data = x_get("tweets/search/recent",
+                         {**MEDIA_PARAMS, "query": query, "max_results": 10})
+            found = parse_posts(data)
+            for p in found:
+                p["source"] = tier
+            print(f"x (leitura) camada {tier}: {len(found)} posts")
+            for p in found[:2]:
+                pre, why = prescore(p, match_products(p["text"]))
+                print(f"    pré {pre} ({why}) @{p['author']}: {p['text'][:70]}")
     except Exception as e:
         print(f"x (leitura): FALHOU {e}")
         ok = False
