@@ -77,8 +77,8 @@ Três ações:
 que só você sabe. É o que mantém a conta com voz de gente.
 
 **Sugestão de post para o perfil** — uma vez por dia, às 9h (`IDEAS_HOUR`), chegam 3
-ideias de post original, cada uma sobre um produto diferente, com a imagem do produto
-anexada. Botões: **✅ Publicar** e **🗑**.
+ideias de post original, cada uma sobre um produto diferente. São posts só de texto.
+Botões: **✅ Publicar** e **🗑**.
 
 ---
 
@@ -159,7 +159,7 @@ começa a parecer spam para o algoritmo, e o retorno cai em vez de subir.
 | "❌ Falhou 403" ao publicar | App da X não está como *Read and write*, ou o Access Token é anterior à mudança. Regenere |
 | Recebe posts repetidos após deploy | O SQLite foi perdido. `DB_PATH` precisa apontar para disco persistente (`/data/bot.db` no Render) |
 | Parou de achar posts no meio do dia | Bateu `MAX_READS_PER_DAY`. Volta sozinho na virada do dia (UTC) |
-| Post do perfil sai sem imagem | `image_url` do catálogo aponta para um caminho que não existe. Abra a URL no navegador para conferir |
+| Quero anexar imagem no post do perfil | O bot publica só texto, de propósito. Para ilustrar um post, publique pelo próprio app da X |
 | Nada chega há horas | Normal em nicho pequeno. Confirme com `--check`, que mostra quantos posts cada camada encontra agora |
 
 ---
@@ -167,7 +167,7 @@ começa a parecer spam para o algoritmo, e o retorno cai em vez de subir.
 ## 8. O que este bot não faz
 
 - **Não responde sozinho.** Nunca. É decisão de projeto, não limitação.
-- **Não lê imagem.** Só o texto do post.
+- **Não lê imagem** dos posts alheios, e **não publica imagem** nos seus. Tudo texto.
 - **Não mede resultado.** Não sabe quais respostas deram like ou clique — isso ainda
   é manual, e é o próximo item mais valioso do backlog.
 - **Não te dá receita da X.** A monetização de replies acabou no início de 2026: só

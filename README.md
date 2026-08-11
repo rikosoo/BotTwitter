@@ -47,7 +47,7 @@ esteja escrito no texto.
 
 **2. Posts originais para o perfil** — uma vez por dia, no horário `IDEAS_HOUR`.
 Cruza o que está em alta nas contas monitoradas com o catálogo e sugere 3 posts, cada
-um sobre um produto diferente, com a imagem do produto anexada quando há `image_url`.
+um sobre um produto diferente. **Só texto** — sem imagem anexada.
 
 A resposta traz o visitante ao perfil; o perfil é quem converte em clique para o site.
 
@@ -192,8 +192,10 @@ Custo — leia antes de alargar a busca:
 ## Catálogo
 
 `catalogo.json` é uma lista de produtos. Campos obrigatórios: `slug`, `name`,
-`character`, `show`. Opcionais: `keywords` (sinônimos que o bot procura no post) e
-`image_url` (usada nos posts do perfil).
+`character`, `show`. Opcional: `keywords` (sinônimos que o bot procura no post).
+
+O campo `image_url` continua nos dados, mas **o bot não usa mais**: o post do perfil é
+só texto. Mantido porque é informação do produto e pode servir em outro lugar.
 
 Quanto mais completo, menos oportunidade boa o bot descarta por "não tenho o produto".
 Hoje tem 10 itens, montados à mão — sincronizar com o site é o item 1 do backlog.

@@ -37,7 +37,7 @@ alta.
 
 **2. Posts originais para o perfil.** Uma vez por dia (`IDEAS_HOUR`), cruza o que está
 em alta nas contas monitoradas com o catálogo e sugere 3 posts, cada um sobre um
-produto diferente. Sobe a imagem do produto junto, se `image_url` estiver preenchido.
+produto diferente. **Só texto** — sem imagem anexada.
 
 Racional: a resposta traz o visitante ao perfil; o perfil é quem converte em clique
 para o site. Sem conteúdo próprio, a primeira metade é desperdiçada.
@@ -61,6 +61,10 @@ para o site. Sem conteúdo próprio, a primeira metade é desperdiçada.
   like, e nesse contexto ler imagem só encarece: sem ela cabe muito mais post analisado
   pelo mesmo dinheiro. Junto saiu a camada de busca `generic` (compra + roupa sem citar
   a série), que só funcionava porque a imagem identificava a produção.
+- **Imagem nos posts do perfil** — removida em 11/08/2026. Dependia do `image_url` do
+  catálogo, que era um palpite (`dresslikeme.store/images/{slug}.jpg`) e falhava em
+  silêncio quando o caminho não existia. Posts do perfil agora são só texto. O campo
+  continua no `catalogo.json`, sem uso pelo bot.
 - **Corte de relevância alto** — afrouxado em 11/08/2026, mesmo motivo. `MIN_SCORE`
   caiu de 7 para 6, o teto de nota para post sem produto no catálogo saiu, e o
   pré-filtro deixou de exigir palavra de roupa quando o post casa com o catálogo.
@@ -103,16 +107,13 @@ Token. Se gerar antes, publicar falha com 403 e é preciso regenerar.
 
 ## Pendências conhecidas
 
-1. **`image_url` do catálogo é um palpite** (`dresslikeme.store/images/{slug}.jpg`).
-   Se o caminho real for outro, o upload falha em silêncio e o post sai sem imagem.
-   Afeta só os posts do perfil; as respostas não usam imagem.
-2. **Catálogo incompleto.** Com 10 produtos, e só 7 personagens, o alcance das buscas
+1. **Catálogo incompleto.** Com 10 produtos, e só 7 personagens, o alcance das buscas
    é estreito — cada personagem novo amplia as duas camadas de uma vez.
-3. **Nunca foi executado de verdade.** `python bot.py --check` valida credenciais e
+2. **Nunca foi executado de verdade.** `python bot.py --check` valida credenciais e
    conectividade sem publicar, mas não houve ciclo real com aprovação e publicação.
-4. **`MAX_READS_PER_DAY` é um chute** (300/dia ≈ 9.000/mês). Só o uso real mostra se
+3. **`MAX_READS_PER_DAY` é um chute** (300/dia ≈ 9.000/mês). Só o uso real mostra se
    cabe no plano contratado da X. Conferir depois da primeira semana.
-5. **Sem métrica de resultado.** Não há como saber quais respostas deram like ou
+4. **Sem métrica de resultado.** Não há como saber quais respostas deram like ou
    clique — é o item 2 do backlog e o que permitiria calibrar o resto.
 
 ## Backlog, em ordem de valor

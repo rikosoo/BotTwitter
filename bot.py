@@ -164,7 +164,7 @@ def init_db():
                 message_id INTEGER, status TEXT DEFAULT 'pending', created_at TEXT);
             CREATE TABLE IF NOT EXISTS seen (tweet_id TEXT PRIMARY KEY, at TEXT);
             CREATE TABLE IF NOT EXISTS ideas (
-                id TEXT PRIMARY KEY, text TEXT, image_url TEXT, product TEXT,
+                id TEXT PRIMARY KEY, text TEXT, product TEXT,
                 message_id INTEGER, status TEXT DEFAULT 'pending', created_at TEXT);
             CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
         """)
@@ -524,51 +524,14 @@ def post_reply(tweet_id, text):
     return r.json()["data"]["id"], None
 
 
-MEDIA_ENDPOINTS = [
-    "https://api.x.com/2/media/upload",                    # atual
-    "https://upload.twitter.com/1.1/media/upload.json",    # legado, em descontinuação
-]
-
-
-def upload_media(image_url):
+def post_tweet(text):
     """
-    Sobe uma imagem pra X e devolve o media_id.
-    Tenta o endpoint v2 e cai no v1.1 se ele não responder — a X migrou o upload
-    e o legado pode sumir a qualquer momento.
+    Publica um post original no perfil (não é resposta). Só texto: o upload de
+    mídia dependia de uma URL de imagem do site que ninguém garante, e falhava
+    em silêncio quando o caminho estava errado.
     """
-    try:
-        img = requests.get(image_url, timeout=30)
-        img.raise_for_status()
-    except Exception as e:
-        print(f"[media] não consegui baixar {image_url}: {e}")
-        return None
-
-    for endpoint in MEDIA_ENDPOINTS:
-        try:
-            r = requests.post(endpoint, auth=oauth,
-                              files={"media": img.content}, timeout=60)
-            r.raise_for_status()
-            data = r.json()
-            media_id = data.get("media_id_string") or data.get("id") or \
-                data.get("data", {}).get("id")
-            if media_id:
-                return str(media_id)
-            print(f"[media] {endpoint} respondeu sem media_id: {str(data)[:120]}")
-        except Exception as e:
-            print(f"[media] {endpoint} falhou: {e}")
-    return None
-
-
-def post_tweet(text, image_url=None):
-    """Publica um post original no perfil (não é resposta)."""
-    payload = {"text": text}
-    if image_url:
-        media_id = upload_media(image_url)
-        if media_id:
-            payload["media"] = {"media_ids": [media_id]}
-
     r = requests.post("https://api.twitter.com/2/tweets", auth=oauth,
-                      json=payload, timeout=30)
+                      json={"text": text}, timeout=30)
     if r.status_code >= 300:
         return None, f"{r.status_code}: {r.text[:200]}"
     return r.json()["data"]["id"], None
@@ -722,14 +685,12 @@ def send_ideas(trending_posts):
 
     for idea in generate_ideas(trending_posts):
         product = by_slug.get(idea.get("slug"), {})
-        image_url = product.get("image_url")
         idea_id = uuid.uuid4().hex[:8]
 
         body = (f"📝 <b>Post para o perfil</b>\n"
                 f"🎬 {html.escape(product.get('name', '—'))}\n\n"
                 f"{html.escape(idea['text'])}\n\n"
-                f"<i>{'com imagem do produto' if image_url else 'sem imagem'}"
-                f" · ou responda com seu próprio texto</i>")
+                f"<i>ou responda com seu próprio texto</i>")
 
         result = tg("sendMessage", chat_id=TELEGRAM_CHAT_ID, text=body,
                     parse_mode="HTML",
@@ -741,15 +702,18 @@ def send_ideas(trending_posts):
 
         with db() as conn:
             conn.execute(
-                "INSERT INTO ideas (id, text, image_url, product, message_id, created_at)"
-                " VALUES (?,?,?,?,?,?)",
-                (idea_id, idea["text"], image_url, product.get("name", ""),
+                "INSERT INTO ideas (id, text, product, message_id, created_at)"
+                " VALUES (?,?,?,?,?)",
+                (idea_id, idea["text"], product.get("name", ""),
                  result["message_id"], datetime.now(timezone.utc).isoformat()))
         print(f"  💡 ideia enviada: {idea['text'][:60]}")
 
 
 def publish_idea(idea, text, chat_id):
-    tweet_id, err = post_tweet(text, idea["image_url"])
+    if not (text or "").strip():
+        tg("sendMessage", chat_id=chat_id, text="❌ Post vazio, nada publicado.")
+        return
+    tweet_id, err = post_tweet(text)
     if err:
         tg("sendMessage", chat_id=chat_id, text=f"❌ Falhou\n{err}")
         return
